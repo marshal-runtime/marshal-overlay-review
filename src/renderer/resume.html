@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';" />
+    <title>Resume</title>
+    <style>
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: transparent;
+        overflow: hidden;
+        font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+        user-select: none;
+      }
+      #pill {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 100%;
+        padding: 0 16px;
+        background: rgba(24, 26, 34, 0.96);
+        color: #f5f6f8;
+        border: 1px solid rgba(255, 149, 0, 0.7);
+        border-radius: 14px;
+        box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      #pill:hover { background: rgba(40, 42, 52, 0.98); }
+      .dot {
+        width: 10px; height: 10px; border-radius: 50%;
+        background: #ff9500;
+      }
+      .key {
+        margin-left: 6px; opacity: 0.7; font-size: 11px;
+      }
+    </style>
+  </head>
+  <body>
+    <button id="pill" title="Resume drawing">
+      <span class="dot"></span>
+      <span><strong>⏵ Resume drawing</strong> — you're using the app underneath</span>
+      <span class="key" id="key"></span>
+    </button>
+    <script src="resume.js"></script>
+  </body>
+</html>

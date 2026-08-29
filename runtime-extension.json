@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "identity": "@marshal/overlay-review",
+  "version": "0.1.0",
+  "entrypoint": "dist/extension/runtime.cjs",
+  "moduleFormat": "commonjs-bundle-v1",
+  "dependencies": {
+    "services": [
+      {
+        "id": "@marshal/marshal:ui.review",
+        "version": "1.0.0"
+      }
+    ]
+  }
+}

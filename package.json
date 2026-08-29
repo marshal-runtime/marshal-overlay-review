@@ -1,0 +1,82 @@
+{
+  "name": "@marshal/overlay-review",
+  "version": "0.1.0",
+  "description": "UI-only Marshal runtime extension for screen review overlays, annotations, screenshots, and voice notes.",
+  "keywords": [
+    "annotation",
+    "electron",
+    "marshal",
+    "overlay",
+    "review",
+    "runtime-extension",
+    "screenshot",
+    "voice"
+  ],
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/extension/runtime.cjs",
+  "types": "dist/main/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/main/index.d.ts",
+      "import": "./dist/main/index.js"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "import": "./dist/shared/index.js"
+    },
+    "./extension": {
+      "types": "./dist/extension/index.d.ts",
+      "import": "./dist/extension/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs/media/overlay-renderer-demo.png",
+    "LICENSE",
+    "README.md",
+    "runtime-extension.json"
+  ],
+  "scripts": {
+    "build": "pnpm run clean && pnpm run build:types && pnpm run build:renderer && pnpm run build:extension",
+    "build:extension": "node scripts/build-extension.mjs",
+    "build:renderer": "node scripts/build-renderer.mjs",
+    "build:types": "tsc -p tsconfig.build.json",
+    "clean": "node scripts/clean.mjs",
+    "prepack": "pnpm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "verify": "pnpm run test && pnpm run typecheck && pnpm run build"
+  },
+  "peerDependencies": {
+    "@marshal/agent-runtime-extensions": ">=0.1.0",
+    "electron": ">=22"
+  },
+  "peerDependenciesMeta": {
+    "@marshal/agent-runtime-extensions": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^31.0.0",
+    "esbuild": "^0.27.0",
+    "happy-dom": "^20.0.0",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
+  "marshal": {
+    "runtimeExtension": "./runtime-extension.json",
+    "bundledByDefault": false
+  }
+}
