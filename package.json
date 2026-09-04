@@ -77,6 +77,6 @@
   },
   "marshal": {
     "runtimeExtension": "./runtime-extension.json",
-    "bundledByDefault": false
+    "bundledByDefault": true
   }
 }

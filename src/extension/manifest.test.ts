@@ -31,7 +31,7 @@ describe("extension manifests", () => {
       main: "dist/extension/runtime.cjs",
       marshal: {
         runtimeExtension: "./runtime-extension.json",
-        bundledByDefault: false,
+        bundledByDefault: true,
       },
     });
     expect(packageMetadata).not.toHaveProperty("marshal.uiRegistration");
