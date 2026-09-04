@@ -40,7 +40,7 @@ function extFor(mimeType: string): string {
 /**
  * Convert a {@link ReviewPayload} into composer-ready attachments plus a
  * markdown summary. Host-agnostic and pure (no DOM / Electron), so a host like
- * Microsoft Scout can map the result onto its own attachment model and unit
+ * Marshal can map the result onto its own attachment model and unit
  * test the mapping.
  *
  * Includes: clean screenshot(s), the composite "marks baked in" preview when
