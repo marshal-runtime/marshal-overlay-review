@@ -2,6 +2,12 @@
   "schemaVersion": 1,
   "identity": "@marshal/overlay-review",
   "version": "0.1.0",
+  "agentGuidance": {
+      "purpose": "Review on screen: an always-on-top overlay for drawings, text notes, voice pins, clean screenshots, and multi-frame visual feedback, returned to the session.",
+      "when": "The user should mark up what they see: pointing at UI regions, annotating a design or page visually, or giving multi-frame feedback that words describe poorly.",
+      "recipe": "Invoke overlay.review.launch (or open the overlay-review application); collected annotations, notes, and frames come back as the result for you to act on.",
+      "boundaries": "Interactive and user-facing: launch it when the user wants to annotate, not to capture their screen unprompted. No MCP tools; not a standalone app."
+  },
   "entrypoint": "dist/extension/runtime.cjs",
   "moduleFormat": "commonjs-bundle-v1",
   "dependencies": {
