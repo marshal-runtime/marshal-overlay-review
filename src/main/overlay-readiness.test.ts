@@ -212,6 +212,9 @@ const mocks = vi.hoisted(() => {
     desktopCapturer: {
       getSources: vi.fn(async () => []),
     },
+    systemPreferences: {
+      getMediaAccessStatus: vi.fn((): string => "granted"),
+    },
     nativeImage: {},
     overlayWindows,
     createOverlayWindow: vi.fn(() => makeWindow()),
@@ -233,6 +236,7 @@ vi.mock("electron", () => ({
   ipcMain: mocks.ipcMain,
   globalShortcut: mocks.globalShortcut,
   desktopCapturer: mocks.desktopCapturer,
+  systemPreferences: mocks.systemPreferences,
   nativeImage: mocks.nativeImage,
   BrowserWindow: class BrowserWindow {},
 }));
@@ -305,6 +309,13 @@ function lastHydrate(win: FakeWindow): HydrateMessage {
 
 function sync(win: FakeWindow, frameId: string, annotations: Annotation[]): void {
   mocks.ipcMain.emitTo(CH.sync, readyEvent(win), { frameId, annotations });
+}
+
+function notices(win: FakeWindow): Array<{ text: string; kind: string; timeoutMs?: number }> {
+  return vi
+    .mocked(win.webContents.send)
+    .mock.calls.filter(([channel]) => channel === CH.notice)
+    .map(([, msg]) => msg as { text: string; kind: string; timeoutMs?: number });
 }
 
 async function frameAction(
@@ -532,5 +543,90 @@ describe("OverlayController renderer readiness", () => {
     expect(payload.frames.every((frame) => frame.displays.map((d) => d.id).includes(2))).toBe(true);
     expect(payload.frames[0]?.screenshots).toEqual([]);
     expect(payload.frames[1]?.screenshots[0]?.displayId).toBe(2);
+  });
+
+  it("still adds the frame and clears busy when capture never resolves", async () => {
+    vi.useFakeTimers();
+    mocks.systemPreferences.getMediaAccessStatus.mockReturnValue("denied");
+    const captureScreenshot = vi.fn(() => new Promise<never>(() => {}));
+    const onError = vi.fn();
+    const controller = createOverlay({
+      hooks: { onSubmitReview: vi.fn(), captureScreenshot, onError },
+      toggleShortcut: false,
+      screenshotDelayMs: 0,
+    });
+    const win = await showReady(controller);
+    sync(win, frameState(win).frameId, [rectangle("r1")]);
+
+    mocks.ipcMain.emitTo(CH.frameAction, readyEvent(win), { action: "add" });
+    // Past the capture timeout (12s) plus the internal capture delays.
+    await vi.advanceTimersByTimeAsync(40_000);
+
+    const state = frameState(win);
+    expect(state.busy).toBe(false);
+    expect(state.count).toBe(2);
+    expect(state.index).toBe(1);
+
+    const text = notices(win).at(-1)!.text;
+    expect(text).toContain("timed out");
+    expect(text).toContain("Screen & System Audio Recording");
+    expect(notices(win).at(-1)!.kind).toBe("error");
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("timed out") }),
+    );
+    mocks.systemPreferences.getMediaAccessStatus.mockReturnValue("granted");
+  });
+
+  it("does not latch submitting when capture never resolves, and still delivers the review", async () => {
+    vi.useFakeTimers();
+    const captureScreenshot = vi.fn(() => new Promise<never>(() => {}));
+    const onSubmitReview = vi.fn();
+    const controller = createOverlay({
+      hooks: { onSubmitReview, captureScreenshot },
+      toggleShortcut: false,
+      screenshotDelayMs: 0,
+    });
+    const win = await showReady(controller);
+    sync(win, frameState(win).frameId, [rectangle("r1")]);
+
+    const submit = controller.submit({ sessionId: "session-1", isNew: false });
+    await vi.advanceTimersByTimeAsync(40_000);
+    const payload = (await submit) as ReviewPayload;
+
+    // The marks still reach the agent; only the screenshot is missing.
+    expect(onSubmitReview).toHaveBeenCalledTimes(1);
+    expect(payload.frames).toHaveLength(1);
+    expect(payload.frames[0]?.annotations).toHaveLength(1);
+    expect(frameState(win).busy).toBe(false);
+
+    // A second submit must be accepted (proves #submitting was released).
+    sync(win, frameState(win).frameId, [rectangle("r2")]);
+    const again = controller.submit({ sessionId: "session-1", isNew: false });
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(await again).not.toBeNull();
+    expect(onSubmitReview).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores display changes while a frame action is in flight", async () => {
+    vi.useFakeTimers();
+    const captureScreenshot = captureHook();
+    const controller = createOverlay({
+      hooks: { onSubmitReview: vi.fn(), captureScreenshot },
+      toggleShortcut: false,
+      screenshotDelayMs: 0,
+    });
+    const win = await showReady(controller);
+    sync(win, frameState(win).frameId, [rectangle("r1")]);
+
+    const windowsBefore = mocks.overlayWindows.length;
+    mocks.ipcMain.emitTo(CH.frameAction, readyEvent(win), { action: "add" });
+    // Fire a metrics change mid-capture: it must not tear down the windows.
+    mocks.screen.emitDisplayChange();
+    expect(mocks.overlayWindows.length).toBe(windowsBefore);
+    expect(win.destroy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(frameState(win).busy).toBe(false);
+    expect(frameState(win).count).toBe(2);
   });
 });

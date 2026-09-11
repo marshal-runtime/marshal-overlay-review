@@ -8,6 +8,7 @@ import {
   globalShortcut,
   ipcMain,
   screen,
+  systemPreferences,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
 } from "electron";
@@ -125,6 +126,49 @@ const DEFAULTS = {
 
 const RENDERER_READY_TIMEOUT_MS = 10_000;
 
+/**
+ * Upper bound on a single screen capture. `desktopCapturer.getSources()` can
+ * block indefinitely (most visibly on macOS while the Screen Recording TCC
+ * prompt is pending). Without a bound, "+ Frame" and "Send all" would leave
+ * `#frameBusy` / `#submitting` latched forever, disabling both buttons for the
+ * rest of the session with no message — so every capture is raced against this.
+ */
+const CAPTURE_TIMEOUT_MS = 8_000;
+
+/** Reject with `message` if `work` has not settled within `ms`. */
+async function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * A human-actionable reason capture is failing, or "" when the OS reports the
+ * permission as granted (or cannot report on it at all).
+ */
+function screenCapturePermissionHint(): string {
+  try {
+    const status = systemPreferences.getMediaAccessStatus("screen");
+    if (status === "granted") return "";
+    return (
+      `Screen Recording permission is "${status}". ` +
+      "Grant it in System Settings → Privacy & Security → Screen & System Audio Recording, " +
+      "enable Marshal, then quit and reopen Marshal."
+    );
+  } catch {
+    // Not supported on this platform; nothing actionable to report.
+    return "";
+  }
+}
+
 interface RendererReadyEntry {
   promise: Promise<void>;
   resolve: () => void;
@@ -212,6 +256,8 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
   #passthrough = false;
   #submitting = false;
   #frameBusy = false;
+  /** Last capture failure (timeout / permission), surfaced once to the user. */
+  #captureFailure: string | null = null;
   #launch: OverlayLaunchContext | null = null;
   #destinations: ReviewDestination[] = [];
   #tool: ToolKind = "pen";
@@ -583,6 +629,7 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
       (w) => !w.isDestroyed() && w.isVisible(),
     );
     let captureMissing = false;
+    this.#captureFailure = null;
 
     try {
       let composites: ScreenshotData[] = [];
@@ -592,7 +639,7 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
             if (!win.isDestroyed()) win.webContents.send(CH.captureMode, true);
           }
           await delay(170);
-          composites = await this.#capture(displays);
+          composites = await this.#captureOrDegrade(displays);
         } catch {
           composites = [];
         } finally {
@@ -606,10 +653,19 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
       for (const win of shownWindows) win.hide();
       if (shownWindows.length > 0) await delay(this.#opts.screenshotDelayMs);
 
-      let screenshots = needImage ? await this.#capture(displays) : [];
-      for (let attempt = 0; attempt < 5 && needImage && !hasAnyImage(screenshots); attempt++) {
+      // If the composite pass already failed hard (timeout / permission), the
+      // clean pass will fail the same way — don't make the user wait twice.
+      let screenshots =
+        needImage && !this.#captureFailure ? await this.#captureOrDegrade(displays) : [];
+      // Retrying a timed-out / permission-denied capture only stalls the user
+      // further, so stop as soon as a capture reports a hard failure.
+      for (
+        let attempt = 0;
+        attempt < 5 && needImage && !hasAnyImage(screenshots) && !this.#captureFailure;
+        attempt++
+      ) {
         await delay(220);
-        screenshots = await this.#capture(displays);
+        screenshots = await this.#captureOrDegrade(displays);
       }
 
       for (const s of screenshots) {
@@ -618,10 +674,11 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
       }
 
       captureMissing = needImage && !hasAnyImage(screenshots);
-      if (captureMissing) {
-        this.#reportError(
-          "Screen capture returned no image data; sending review without screenshot",
-        );
+      if (captureMissing && !this.#captureFailure) {
+        const hint = screenCapturePermissionHint();
+        this.#captureFailure =
+          `Screen capture returned no image data.${hint ? ` ${hint}` : ""}`;
+        this.#reportError(this.#captureFailure);
       }
 
       frame.displays = displays.map((d) => ({ ...d }));
@@ -661,9 +718,9 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
     if (!this.#visible) return;
     this.#frameBusy = true;
     const wasVisible = this.#visible;
-    this.#setMode("submitting");
-    this.#broadcastFrameState();
     try {
+      this.#setMode("submitting");
+      this.#broadcastFrameState();
       if (req.action === "add") {
         this.#notice("Capturing current frame…", "info", 0);
         await this.#captureCurrentFrameIfNeeded();
@@ -671,10 +728,20 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
         this.#frames.splice(this.#currentFrameIndex + 1, 0, next);
         this.#currentFrameIndex += 1;
         this.#hydrateCurrentFrame();
-        this.#notice(
-          `Frame ${this.#currentFrameIndex + 1} of ${this.#frames.length} ready.`,
-          "success",
-        );
+        // The frame is added either way; a failed capture is reported without
+        // discarding the user's marks.
+        if (this.#captureFailure) {
+          this.#notice(
+            `Frame ${this.#currentFrameIndex + 1} of ${this.#frames.length} added, but the screenshot failed. ${this.#captureFailure}`,
+            "error",
+            0,
+          );
+        } else {
+          this.#notice(
+            `Frame ${this.#currentFrameIndex + 1} of ${this.#frames.length} ready.`,
+            "success",
+          );
+        }
         return;
       }
 
@@ -744,7 +811,11 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
       }
     } catch (err) {
       this.#reportError("Frame action failed", err);
-      this.#notice("Frame action failed — your current marks are kept.", "error", 5000);
+      this.#notice(
+        `Frame action failed — your current marks are kept. ${err instanceof Error ? err.message : String(err)}`,
+        "error",
+        0,
+      );
     } finally {
       this.#frameBusy = false;
       this.#broadcastFrameState();
@@ -760,13 +831,13 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
     }
     const resolvedTarget: ReviewTarget = target ?? this.#defaultTarget();
     this.#submitting = true;
-    this.#setMode("submitting");
-    this.#notice("Sending all frames to the agent…", "info", 0);
-    this.#broadcastFrameState();
     const wasVisible = this.#visible;
     let failed = false;
 
     try {
+      this.#setMode("submitting");
+      this.#notice("Sending all frames to the agent…", "info", 0);
+      this.#broadcastFrameState();
       await this.#captureCurrentFrame();
       const frames = this.#framesForSubmit();
       const captureMissing = frames.some(
@@ -788,9 +859,10 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
           : "the session";
       this.#notice(
         captureMissing
-          ? `Review sent to ${dest} (one or more screenshots unavailable).`
+          ? `Review sent to ${dest} without screenshots. ${this.#captureFailure ?? "Screen capture returned no image data."}`
           : `Review sent to ${dest} — ${payload.summary.annotationCount} item(s) across ${payload.frames.length} frame(s).`,
-        captureMissing ? "info" : "success",
+        captureMissing ? "error" : "success",
+        captureMissing ? 0 : undefined,
       );
 
       if (this.#opts.clearOnSubmit) this.clear();
@@ -800,9 +872,9 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
       failed = true;
       this.#reportError("Submit failed", err);
       this.#notice(
-        "Send failed — your frames are kept. Press Ctrl/Cmd+Enter to retry.",
+        `Send failed — your frames are kept. Press ${this.#opts.submitShortcut} to retry. ${err instanceof Error ? err.message : String(err)}`,
         "error",
-        5000,
+        0,
       );
       return null;
     } finally {
@@ -855,9 +927,33 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
   }
 
   async #capture(displays: readonly DisplayInfo[]): Promise<ScreenshotData[]> {
-    return this.#hooks.captureScreenshot
-      ? await this.#hooks.captureScreenshot(displays)
-      : await captureDisplays(displays);
+    const work = this.#hooks.captureScreenshot
+      ? Promise.resolve(this.#hooks.captureScreenshot(displays))
+      : captureDisplays(displays);
+    const hint = screenCapturePermissionHint();
+    return await withTimeout(
+      work,
+      CAPTURE_TIMEOUT_MS,
+      `Screen capture timed out after ${CAPTURE_TIMEOUT_MS / 1000}s.${hint ? ` ${hint}` : ""}`,
+    );
+  }
+
+  /**
+   * Capture, degrading to "no screenshots" instead of throwing. A failed
+   * capture must never abort the surrounding frame action or submit: the user's
+   * marks are the irreplaceable part, so we keep going and tell them what broke.
+   */
+  async #captureOrDegrade(displays: readonly DisplayInfo[]): Promise<ScreenshotData[]> {
+    try {
+      return await this.#capture(displays);
+    } catch (err) {
+      const hint = screenCapturePermissionHint();
+      this.#captureFailure = `${err instanceof Error ? err.message : String(err)}${
+        hint && !String(err).includes(hint) ? ` ${hint}` : ""
+      }`;
+      this.#reportError(this.#captureFailure, err);
+      return [];
+    }
   }
 
   #buildWindows(): void {
@@ -1012,7 +1108,9 @@ class OverlayControllerImpl extends EventEmitter implements OverlayController {
   }
 
   #onDisplaysChanged = (): void => {
-    if (this.#submitting) return;
+    // Rebuilding windows underneath an in-flight capture would strand the
+    // frame action on destroyed webContents, so skip while busy too.
+    if (this.#submitting || this.#frameBusy) return;
     const wasVisible = this.#visible;
     this.#saveCurrentFrame();
     const newDisplays = screen.getAllDisplays().map(toDisplayInfo);
